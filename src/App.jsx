@@ -29,74 +29,132 @@ const isTextOk    = val  => /clear/i.test(String(val ?? ""));
 
 function parseSheet(sheet, sheetName) {
   const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+
+  // ── Detect format ──────────────────────────────────────────
+  let isCOA = false; // Certificate of Analysis (Ambu, Adventist)
+  for (let i = 0; i < Math.min(25, rows.length); i++) {
+    const s = rows[i].map(c => c != null ? String(c) : "").join(" ");
+    if (/CERTIFICATE OF ANALYSIS/i.test(s)) { isCOA = true; break; }
+  }
+
+  // ── Extract metadata ───────────────────────────────────────
   let reportMonth = sheetName, company = "", attention = "", cc = "", systemLabel = "";
-  for (let i = 0; i < Math.min(20, rows.length); i++) {
-    const rowStr = rows[i].map(c => c != null ? String(c) : "").join(" ");
+  for (let i = 0; i < Math.min(30, rows.length); i++) {
+    const r = rows[i];
+    const rowStr = r.map(c => c != null ? String(c) : "").join(" ");
+    // CWTAR: "REPORT FOR THE MONTH OF : January 2025"
     if (/REPORT FOR THE MONTH OF/i.test(rowStr)) {
-      const parts = rows[i].filter(c => c != null && String(c).trim() !== "");
+      const parts = r.filter(c => c != null && String(c).trim() !== "");
       const last = parts[parts.length - 1];
       if (last && !/MONTH/i.test(String(last))) reportMonth = String(last);
     }
-    if (/^\s*TO\s*$/.test(String(rows[i][1] || "")))     company   = String(rows[i][5] || "");
-    if (/ATTENTION/i.test(String(rows[i][1] || "")))      attention = String(rows[i][5] || "");
-    if (/^\s*CC\s*$/i.test(String(rows[i][1] || "")))     cc        = String(rows[i][5] || "");
-    if (/B\.\s*BRAUN|A\/C|CT\s*B/i.test(rowStr) && /149|170|RT/i.test(rowStr))
-      systemLabel = rowStr.replace(/\s+/g, " ").trim().slice(0, 80);
+    // COA: "DATE : 3rd January 2025" (use as reportMonth)
+    if (isCOA && /^\s*DATE\s*$/.test(String(r[1] || "")) && r[5]) {
+      reportMonth = String(r[5]).trim();
+    }
+    if (/^\s*TO\s*$/.test(String(r[1] || "")))    company   = String(r[5] || "");
+    if (/ATTENTION/i.test(String(r[1] || "")))     attention = String(r[5] || "");
+    if (/^\s*CC\.?\s*$/.test(String(r[1] || ""))) cc        = String(r[5] || "");
+    // System label: row 17 in CWTAR (e.g. "1.3 : B.BRAUN...")
+    if (/^\d+\.\d+\s*:/.test(String(r[1] || "")) && !systemLabel)
+      systemLabel = String(r[1]).trim().slice(0, 80);
   }
 
+  // ── Find header row (has "TYPE OF PARAMETER") ─────────────
   let headerRowIdx = -1;
   for (let i = 0; i < rows.length; i++) {
-    const rowStr = rows[i].map(c => c != null ? String(c) : "").join(" ");
-    if (/TYPE OF PARAMETER/i.test(rowStr) || /CONTROL\s*LIMIT/i.test(rowStr)) { headerRowIdx = i; break; }
+    const s = rows[i].map(c => c != null ? String(c) : "").join(" ");
+    if (/TYPE OF PARAMETER/i.test(s)) { headerRowIdx = i; break; }
   }
   if (headerRowIdx === -1) return null;
 
-  const dateRow = rows[headerRowIdx - 1] || [];
+  const headerRow     = rows[headerRowIdx]     || [];
+  const headerRowNext = rows[headerRowIdx + 1] || [];
 
-  // Detect City Water column from header text rows
-  let cityWaterCol = -1;
-  for (let c = 0; c < Math.max(rows[headerRowIdx]?.length || 0, rows[headerRowIdx+1]?.length || 0); c++) {
-    const a = String(rows[headerRowIdx]?.[c]  ?? "").toLowerCase();
-    const b = String(rows[headerRowIdx+1]?.[c] ?? "").toLowerCase();
-    if (a.includes("city") || b.includes("city") || a.includes("water") || b.includes("water")) {
-      cityWaterCol = c; break;
-    }
-  }
-
-  // All date-row non-null cells after cityWaterCol = sample columns
-  const sampleCols = [];
-  const startScanCol = cityWaterCol >= 0 ? cityWaterCol + 1 : 6;
-  for (let c = startScanCol; c < dateRow.length; c++) {
-    if (dateRow[c] != null && String(dateRow[c]).trim() !== "") sampleCols.push(c);
-  }
-
+  // ── Find CONTROL LIMIT column ──────────────────────────────
   let controlLimitCol = -1;
-  for (let c = (rows[headerRowIdx]?.length || 0) - 1; c >= 0; c--) {
-    const v = String(rows[headerRowIdx]?.[c] || rows[headerRowIdx+1]?.[c] || "").trim();
+  for (let c = (headerRow.length || 0) - 1; c >= 0; c--) {
+    const v = String(headerRow[c] || headerRowNext[c] || "").trim();
     if (/CONTROL|LIMIT/i.test(v)) { controlLimitCol = c; break; }
   }
-  if (controlLimitCol === -1) controlLimitCol = (rows[headerRowIdx]?.length || 1) - 1;
+  if (controlLimitCol === -1) controlLimitCol = (headerRow.length || 1) - 1;
 
-  const filteredSampleCols = sampleCols.filter(c => c !== controlLimitCol);
+  let cityWaterCol = -1;
+  let sampleCols   = [];
+  let sampleDates  = [];
+  let dataRowStart = headerRowIdx + 1;
 
-  const dataRowStart = headerRowIdx + 3;
+  if (isCOA) {
+    // ── COA format ─────────────────────────────────────────
+    // City water = M/U column (in header row)
+    for (let c = 0; c < headerRow.length; c++) {
+      const v = String(headerRow[c] || "").trim();
+      if (/^M\/U/i.test(v)) { cityWaterCol = c; break; }
+    }
+    // Sample cols = between cityWaterCol+1 and controlLimitCol (exclusive)
+    for (let c = (cityWaterCol >= 0 ? cityWaterCol + 1 : 6); c < controlLimitCol; c++) {
+      sampleCols.push(c);
+    }
+    // Sample labels = the column header text (e.g. "B1", "B1 Process", "COOLING TOWER(750RT)")
+    sampleDates = sampleCols.map(c => String(headerRow[c] || "").trim() || `S${c}`);
+    dataRowStart = headerRowIdx + 1;
+
+  } else {
+    // ── CWTAR format (existing logic) ─────────────────────
+    const dateRow = rows[headerRowIdx - 1] || [];
+    // Detect City Water column from 2-row header span
+    for (let c = 0; c < Math.max(headerRow.length || 0, headerRowNext.length || 0); c++) {
+      const a = String(headerRow[c]     ?? "").toLowerCase();
+      const b = String(headerRowNext[c] ?? "").toLowerCase();
+      if (a.includes("city") || b.includes("city") || a.includes("water") || b.includes("water")) {
+        cityWaterCol = c; break;
+      }
+    }
+    const startScanCol = cityWaterCol >= 0 ? cityWaterCol + 1 : 6;
+    for (let c = startScanCol; c < dateRow.length; c++) {
+      if (dateRow[c] != null && String(dateRow[c]).trim() !== "") sampleCols.push(c);
+    }
+    sampleCols = sampleCols.filter(c => c !== controlLimitCol);
+    sampleDates = sampleCols.map((c, si) => {
+      const v = dateRow[c];
+      if (!v) return `S${si+1}`;
+      if (typeof v === "number") {
+        const d = XLSX.SSF.parse_date_code(v);
+        if (d) return `${d.d}/${d.m}`;
+      }
+      return String(v).replace(/\d{4}/, "").replace(/^[-/]|[-/]$/g, "").trim() || `S${si+1}`;
+    });
+    dataRowStart = headerRowIdx + 3; // skip 2-row header + blank row
+  }
+
+  // ── Parse data rows ────────────────────────────────────────
   const parameters = [];
   for (let i = dataRowStart; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.every(c => c == null)) continue;
     const paramName = row[2] != null ? String(row[2]).trim() : null;
-    if (!paramName || paramName === "" || /Kuritex.*=.*Corrosion/i.test(paramName)) continue;
+    if (!paramName || paramName === "") continue;
+    if (/Kuritex.*=.*Corrosion|M\/U\s*=\s*MAKE/i.test(paramName)) continue;
+    if (/^\*\s*M\/U/i.test(String(row[1] || ""))) continue;
     if (/REMARKS/i.test(String(row[1] || ""))) break;
+    if (/END OF REPORT|Standard Method/i.test(paramName)) break;
 
-    const cityWater = cityWaterCol >= 0 && row[cityWaterCol] != null ? String(row[cityWaterCol]).trim() : null;
-    const limitRaw  = row[controlLimitCol] != null ? String(row[controlLimitCol]).trim() : null;
+    const cityWater = cityWaterCol >= 0 && row[cityWaterCol] != null
+      ? String(row[cityWaterCol]).trim() : null;
+    const limitRaw = row[controlLimitCol] != null ? String(row[controlLimitCol]).trim() : null;
     const { min, max } = parseControlLimit(limitRaw);
-    const isText = isTextParam(paramName);
+    const isText   = isTextParam(paramName);
     const methodNum = row[1] != null ? String(row[1]).trim() : null;
+
+    // Keep full structure — null = no data, shown as "—"
     const samples = isText
-      ? filteredSampleCols.map(c => row[c] != null ? String(row[c]).trim() : null).filter(v => v !== null)
-      : filteredSampleCols.map(c => tryNum(row[c])).filter(v => v !== null);
-    if (samples.length === 0 && cityWater === null) continue;
+      ? sampleCols.map(c => row[c] != null ? String(row[c]).trim() : null)
+      : sampleCols.map(c => tryNum(row[c]));
+
+    // Only skip if absolutely no data at all
+    const hasAnyData = samples.some(v => v !== null) || (cityWater && cityWater !== "-");
+    if (!hasAnyData) continue;
+
     parameters.push({ name: paramName, methodNum, cityWater, samples, limitRaw, min, max, isText });
   }
 
@@ -105,20 +163,10 @@ function parseSheet(sheet, sheetName) {
     const row = rows[i];
     if (!row) continue;
     const cell = String(row[1] || "").trim();
-    if (cell.length > 30 && !/Method|Standard|HANNA|HACH|Merck|BKG/i.test(cell)) remarks.push(cell);
+    if (cell.length > 30 && !/Method|Standard|HANNA|HACH|Merck|BKG|M\/U/i.test(cell)) remarks.push(cell);
   }
 
-  const sampleDates = filteredSampleCols.map((c, si) => {
-    const v = dateRow[c];
-    if (!v) return `S${si+1}`;
-    if (typeof v === "number") {
-      const d = XLSX.SSF.parse_date_code(v);
-      if (d) return `${d.d}/${d.m}`;
-    }
-    return String(v).replace(/\d{4}/, "").replace(/^[-/]|[-/]$/g, "").trim() || `S${si+1}`;
-  });
-
-  return { reportMonth, company, attention, cc, systemLabel, parameters, sampleDates, remarks };
+  return { reportMonth, company, attention, cc, systemLabel, parameters, sampleDates, isCOA };
 }
 
 function parseWorkbook(buffer) {
@@ -158,8 +206,8 @@ function buildFlatSeries(paramName, isText, min, max, sheets, sheetOrder) {
     p.samples.forEach((v, si) => {
       const dl = dates[si] || `${si+1}`;
       const numVal = (!isText && typeof v === "number") ? v : null;
-      const ok = isText ? isTextOk(v) : isInRange(v, min, max);
-      pts.push({ label: `${dl}(${sh})`, value: numVal, rawVal: v, month: sh, date: dl, ok });
+      const ok = v === null ? null : (isText ? isTextOk(v) : isInRange(v, min, max));
+      pts.push({ label: `${dl}(${sh})`, shortLabel: dl, value: numVal, rawVal: v, month: sh, date: dl, ok });
     });
   }
   return pts;
@@ -278,9 +326,9 @@ function SvgLineChart({ flatData, color, min, max, decimals, limitRaw, width = 5
               </text>
             )}
             <circle cx={x} cy={y} r={4}
-              fill={d.ok ? color : "#ff3333"}
-              stroke={d.ok ? "none" : "#ff0000"}
-              strokeWidth={d.ok ? 0 : 1.5}
+              fill={d.ok === null ? "#555" : d.ok ? color : "#ff3333"}
+              stroke={d.ok === false ? "#ff0000" : "none"}
+              strokeWidth={d.ok === false ? 1.5 : 0}
               style={{ cursor:"pointer" }}
               onMouseEnter={(e) => setTooltip({ i, x, y, d })}
             />
@@ -684,8 +732,9 @@ export default function App() {
     bySheet: sheetOrder.map(sh => {
       const found = sheets[sh].parameters.find(x=>x.name===p.name);
       if (!found) return { sh, ok:null };
-      if (p.isText) return { sh, ok:found.samples.every(v=>isTextOk(v)), val:found.samples[0] };
+      if (p.isText) return { sh, ok:found.samples.every(v=>v!=null&&isTextOk(v)), val:found.samples[0] };
       const nums = found.samples.filter(v=>typeof v==="number");
+      if (!nums.length) return { sh, ok:null };
       return { sh, ok:isInRange(avgNums(nums),p.min,p.max), val:avgNums(nums) };
     }),
   }));
@@ -890,13 +939,13 @@ export default function App() {
                           {/* Sample readings */}
                           {Array.from({length:numSamples}).map((_,si) => {
                             const v  = p.samples[si] ?? null;
-                            const ok = v===null ? true : (isText ? isTextOk(v) : isInRange(v,min,max));
+                            const ok = v===null ? null : (isText ? isTextOk(v) : isInRange(v,min,max));
                             const display = v===null ? "—" : isText ? String(v) : typeof v==="number" ? v.toFixed(decimals) : String(v);
                             return (
                               <div key={si} style={{
                                 padding:"11px 6px", textAlign:"center", fontSize:12, fontWeight:500,
                                 color:      v===null?"#333": ok?(isText?"#00e676":"#ddd"):"#ff6b6b",
-                                background: v!==null&&!ok?"rgba(255,100,100,0.07)":"transparent",
+                                background: v!==null&&ok===false?"rgba(255,100,100,0.07)":"transparent",
                               }}>{display}</div>
                             );
                           })}
