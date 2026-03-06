@@ -92,11 +92,12 @@ function parseSheet(sheet, sheetName) {
     const limitRaw  = row[controlLimitCol] != null ? String(row[controlLimitCol]).trim() : null;
     const { min, max } = parseControlLimit(limitRaw);
     const isText = isTextParam(paramName);
+    const methodNum = row[1] != null ? String(row[1]).trim() : null;
     const samples = isText
       ? filteredSampleCols.map(c => row[c] != null ? String(row[c]).trim() : null).filter(v => v !== null)
       : filteredSampleCols.map(c => tryNum(row[c])).filter(v => v !== null);
     if (samples.length === 0 && cityWater === null) continue;
-    parameters.push({ name: paramName, cityWater, samples, limitRaw, min, max, isText });
+    parameters.push({ name: paramName, methodNum, cityWater, samples, limitRaw, min, max, isText });
   }
 
   const remarks = [];
@@ -840,8 +841,8 @@ export default function App() {
 
             {currentSheetData && (() => {
               const numSamples = currentSheetData.parameters[0]?.samples.length || 0;
-              // Check if any parameter has city water data
-              const hasCityWater = currentSheetData.parameters.some(p => p.cityWater != null && p.cityWater !== "" && p.cityWater !== "-");
+              const colTemplate = `70px 220px 90px repeat(${numSamples}, 90px) 120px`;
+              const minW = 70 + 220 + 90 + (numSamples * 90) + 120;
               return (
                 <div>
                   <div style={{ fontSize:11, color:"#555", textTransform:"uppercase", marginBottom:12 }}>
@@ -849,74 +850,68 @@ export default function App() {
                     {currentSheetData.sampleDates?.length ? ` · ${currentSheetData.sampleDates.join(" · ")}` : ""}
                   </div>
                   <div style={{ background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:12, overflow:"auto" }}>
-                    {/* Header */}
-                    <div style={{ display:"grid", gridTemplateColumns:`220px ${hasCityWater?"90px":""}repeat(${numSamples},1fr) 110px`, borderBottom:"1px solid rgba(255,255,255,0.08)", background:"rgba(255,255,255,0.03)", minWidth:500 }}>
-                      <div style={{ padding:"10px 14px", fontSize:11, color:"#555" }}>PARAMETER</div>
-                      {hasCityWater && <div style={{ padding:"10px 6px", fontSize:11, color:"#6baaff", textAlign:"center", borderLeft:"1px solid rgba(255,255,255,0.06)" }}>CITY WATER</div>}
+                    {/* Header row — matches Excel column order */}
+                    <div style={{ display:"grid", gridTemplateColumns:colTemplate, borderBottom:"1px solid rgba(255,255,255,0.1)", background:"rgba(255,255,255,0.04)", minWidth:minW }}>
+                      <div style={{ padding:"11px 8px", fontSize:10, color:"#555", textAlign:"center", letterSpacing:"0.04em" }}>METHOD #</div>
+                      <div style={{ padding:"11px 14px", fontSize:10, color:"#555", letterSpacing:"0.04em" }}>TYPE OF PARAMETER</div>
+                      <div style={{ padding:"11px 6px", fontSize:10, color:"#6baaff", textAlign:"center", borderLeft:"1px solid rgba(255,255,255,0.07)", borderRight:"1px solid rgba(255,255,255,0.07)", background:"rgba(107,170,255,0.04)" }}>CITY WATER</div>
                       {Array.from({length:numSamples}).map((_,si) => (
-                        <div key={si} style={{ padding:"10px 6px", fontSize:11, color:"#555", textAlign:"center" }}>
+                        <div key={si} style={{ padding:"11px 6px", fontSize:10, color:"#ccc", textAlign:"center", fontWeight:600 }}>
                           {currentSheetData.sampleDates?.[si] || `S${si+1}`}
                         </div>
                       ))}
-                      <div style={{ padding:"10px 6px", fontSize:11, color:"#555", textAlign:"center" }}>LIMIT</div>
+                      <div style={{ padding:"11px 8px", fontSize:10, color:"#555", textAlign:"center", borderLeft:"1px solid rgba(255,255,255,0.07)" }}>CONTROL LIMIT</div>
                     </div>
-                    {/* Rows */}
-                    {currentSheetData.parameters.map((p,pi) => {
-                      const meta2 = paramMeta.find(x=>x.name===p.name)||{};
+
+                    {/* Data rows */}
+                    {currentSheetData.parameters.map((p, pi) => {
+                      const meta2 = paramMeta.find(x => x.name === p.name) || {};
                       const { min, max, decimals=2, color="#888", isText=false } = meta2;
                       const cityWaterNum = tryNum(p.cityWater);
-                      const cityWaterOk = p.isText
-                        ? isTextOk(p.cityWater)
-                        : isInRange(cityWaterNum, min, max);
+                      const hasCW = p.cityWater != null && p.cityWater !== "" && p.cityWater !== "-";
 
                       return (
-                        <div key={pi} style={{ display:"grid", gridTemplateColumns:`220px ${hasCityWater?"90px":""}repeat(${numSamples},1fr) 110px`, borderBottom:pi<currentSheetData.parameters.length-1?"1px solid rgba(255,255,255,0.04)":"none", background:pi%2?"rgba(255,255,255,0.01)":"transparent", minWidth:500 }}>
+                        <div key={pi} style={{ display:"grid", gridTemplateColumns:colTemplate, borderBottom:pi<currentSheetData.parameters.length-1?"1px solid rgba(255,255,255,0.04)":"none", background:pi%2?"rgba(255,255,255,0.015)":"transparent", minWidth:minW }}>
+                          {/* Method # */}
+                          <div style={{ padding:"11px 8px", textAlign:"center", fontSize:11, color:"#444", fontFamily:SFMono }}>
+                            {p.methodNum || "—"}
+                          </div>
+                          {/* Parameter name */}
                           <div style={{ padding:"11px 14px", display:"flex", alignItems:"center", gap:7 }}>
                             <span style={{ display:"inline-block", width:7, height:7, borderRadius:"50%", background:color, flexShrink:0 }} />
-                            <span style={{ fontSize:12, color:"#bbb", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={p.name}>{p.name}</span>
+                            <span style={{ fontSize:12, color:"#ccc", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={p.name}>{p.name}</span>
                           </div>
-                          {/* City Water cell */}
-                          {hasCityWater && (
-                            <div style={{
-                              padding:"11px 6px", textAlign:"center", fontSize:12, fontWeight:500,
-                              borderLeft:"1px solid rgba(255,255,255,0.06)",
-                              color: p.cityWater==null||p.cityWater==="-" ? "#333"
-                                : isText ? (isTextOk(p.cityWater)?"#6baaff":"#ff6b6b") : "#6baaff",
-                              background:"rgba(107,170,255,0.03)",
-                            }}>
-                              {p.cityWater==null||p.cityWater==="-"||p.cityWater===""
-                                ? "—"
-                                : isText ? p.cityWater
-                                : cityWaterNum!=null ? cityWaterNum.toFixed(decimals) : p.cityWater}
-                            </div>
-                          )}
-                          {/* Sample cells */}
+                          {/* City Water */}
+                          <div style={{ padding:"11px 6px", textAlign:"center", fontSize:12, fontWeight:500, borderLeft:"1px solid rgba(255,255,255,0.06)", borderRight:"1px solid rgba(255,255,255,0.06)", background:"rgba(107,170,255,0.03)", color: hasCW ? "#6baaff" : "#333" }}>
+                            {hasCW
+                              ? (isText ? p.cityWater : cityWaterNum!=null ? cityWaterNum.toFixed(decimals) : p.cityWater)
+                              : "—"}
+                          </div>
+                          {/* Sample readings */}
                           {Array.from({length:numSamples}).map((_,si) => {
-                            const v = p.samples[si] ?? null;
+                            const v  = p.samples[si] ?? null;
                             const ok = v===null ? true : (isText ? isTextOk(v) : isInRange(v,min,max));
                             const display = v===null ? "—" : isText ? String(v) : typeof v==="number" ? v.toFixed(decimals) : String(v);
                             return (
                               <div key={si} style={{
                                 padding:"11px 6px", textAlign:"center", fontSize:12, fontWeight:500,
-                                color: v===null?"#444":ok?(isText?"#00e676":"#ccc"):"#ff6b6b",
-                                background: v!==null&&!ok?"rgba(255,100,100,0.05)":"transparent",
+                                color:      v===null?"#333": ok?(isText?"#00e676":"#ddd"):"#ff6b6b",
+                                background: v!==null&&!ok?"rgba(255,100,100,0.07)":"transparent",
                               }}>{display}</div>
                             );
                           })}
-                          <div style={{ padding:"11px 8px", textAlign:"center", fontSize:11, color:"#555" }}>
-                            {isText?"Clear":(p.limitRaw||"—")}
+                          {/* Control limit */}
+                          <div style={{ padding:"11px 8px", textAlign:"center", fontSize:11, color:"#555", borderLeft:"1px solid rgba(255,255,255,0.06)", fontFamily:SFMono }}>
+                            {isText ? "Clear" : (p.limitRaw || "—")}
                           </div>
                         </div>
                       );
                     })}
                   </div>
-                  {/* City water legend */}
-                  {hasCityWater && (
-                    <div style={{ marginTop:10, fontSize:11, color:"#6baaff", opacity:0.7 }}>
-                      <span style={{ display:"inline-block", width:8, height:8, borderRadius:2, background:"#6baaff", marginRight:6, opacity:0.6 }} />
-                      City Water values shown for reference — used to assess treatment efficiency
-                    </div>
-                  )}
+                  <div style={{ marginTop:10, fontSize:11, color:"#6baaff", opacity:0.6, fontFamily:SF }}>
+                    <span style={{ display:"inline-block", width:8, height:8, borderRadius:2, background:"#6baaff", marginRight:6, opacity:0.6 }} />
+                    City Water values shown for reference — used to assess treatment efficiency
+                  </div>
                 </div>
               );
             })()}
